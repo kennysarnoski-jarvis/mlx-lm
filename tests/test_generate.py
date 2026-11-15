@@ -197,6 +197,45 @@ class TestGenerate(unittest.TestCase):
                     pass
                 self.assertEqual([c.offset for c in cache], [size] * len(cache))
 
+    def test_speculative_sliding_window_matches_generate_step(self):
+        from mlx_lm.models import gemma3_text
+
+        # A RotatingKVCache stops being trimmable once it is full, so rejected
+        # draft tokens have to be rewound another way.
+        mx.random.seed(0)
+        model = gemma3_text.Model(
+            gemma3_text.ModelArgs(
+                model_type="gemma3_text",
+                hidden_size=64,
+                num_hidden_layers=4,
+                intermediate_size=128,
+                num_attention_heads=4,
+                head_dim=16,
+                vocab_size=100,
+                num_key_value_heads=2,
+                sliding_window=8,
+                sliding_window_pattern=2,
+            )
+        )
+
+        # Always proposes token 0, so the target rejects the drafts.
+        class RejectedDraft:
+            layers = model.layers
+            make_cache = model.make_cache
+
+            def __call__(self, inputs, cache=None):
+                return model(inputs, cache=cache).at[..., 0].add(1e4)
+
+        prompt = mx.array([11, 12, 13, 14, 15])
+        expected = list(generate_step(prompt, model, max_tokens=24))
+        for draft in [model, RejectedDraft()]:
+            gen = speculative_generate_step(
+                prompt, model, draft, num_draft_tokens=3, max_tokens=24
+            )
+            for (token, logprobs, _), (e_token, e_logprobs) in zip(gen, expected):
+                self.assertEqual(token, e_token)
+                self.assertTrue(mx.allclose(logprobs, e_logprobs, atol=1e-4))
+
     def test_stream_generate_input_embeddings(self):
         sampler = make_sampler(temp=0.0)  # determinate sampler
 

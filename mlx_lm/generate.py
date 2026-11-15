@@ -31,6 +31,7 @@ from transformers import PreTrainedTokenizer
 from .generate_utils import BatchCounters, BatchCountersSnapshot, BatchStats
 from .models.cache import (
     QuantizedKVCache,
+    RotatingKVCache,
     TokenBuffer,
     can_trim_prompt_cache,
     load_prompt_cache,
@@ -605,13 +606,35 @@ def speculative_generate_step(
             mx.clear_cache()
         return y
 
-    def _rewind_cache(num_draft, num_accept):
-        trim_prompt_cache(model_cache, num_draft - num_accept)
-        trim_prompt_cache(draft_cache, max(num_draft - num_accept - 1, 0))
+    def _snapshot(cache):
+        # A cache that is trimmable now can stop being trimmable once it is
+        # full (e.g. RotatingKVCache), so keep its state to rewind from.
+        if any(isinstance(c, RotatingKVCache) for c in cache):
+            return copy.deepcopy([c.state for c in cache])
+        return None
+
+    def _rewind(model, cache, snapshot, inputs, num_keep):
+        # Drop everything after the first ``num_keep`` of ``inputs``.
+        num_trim = inputs.size - num_keep
+        if num_trim <= 0:
+            return
+        if can_trim_prompt_cache(cache):
+            trim_prompt_cache(cache, num_trim)
+        elif snapshot is not None:
+            for c, state in zip(cache, snapshot):
+                c.state = state
+            if num_keep > 0:
+                model(inputs[:num_keep][None], cache=cache)
+                quantize_cache_fn(cache)
+                mx.eval([c.state for c in cache])
+        else:
+            raise ValueError("Speculative decoding could not rewind the prompt cache.")
 
     def _draft_generate(y, num_draft):
         if num_draft == 0:
             return mx.array([], mx.uint32)
+        nonlocal draft_snapshot
+        draft_snapshot = _snapshot(draft_cache)
         ys = []
         for _ in range(num_draft):
             y, _ = _step(draft_model, draft_cache, y)
@@ -627,18 +650,44 @@ def speculative_generate_step(
         # Set these so the finally block doesn't raise
         num_draft = 0
         n = 0
+        rewound = True
+        model_snapshot = draft_snapshot = None
         # Tokens that were yielded but not yet processed by each model.
         pending_model = pending_draft = None
+        model_inputs = draft_inputs = y[:0]
+
+        def _rewind_cache(num_draft, num_accept):
+            nonlocal rewound
+            if rewound or num_draft == 0:
+                return
+            rewound = True
+            # The model saw the last token and every draft token. The draft
+            # model saw its inputs and every draft token but the last one.
+            _rewind(model, model_cache, model_snapshot, model_inputs, num_accept + 1)
+            _rewind(
+                draft_model,
+                draft_cache,
+                draft_snapshot,
+                draft_inputs,
+                min(draft_inputs.size, draft_inputs.size - num_draft + num_accept + 1),
+            )
+
         try:
             while True:
                 num_draft = min(max_tokens - ntoks, num_draft_tokens)
                 draft_tokens = _draft_generate(draft_y, num_draft)
                 pending_draft = None
+                draft_inputs = mx.concatenate(
+                    [draft_y, draft_tokens[: max(num_draft - 1, 0)]]
+                )
                 if prev_tokens is not None:
                     prev_tokens = prev_tokens[
                         : prev_tokens.size - y.size - num_draft + 1
                     ]
                 y = mx.concatenate([y, draft_tokens])
+                model_snapshot = _snapshot(model_cache)
+                model_inputs = y
+                rewound = False
                 pending_model = None
                 tokens, logprobs = _step(model, model_cache, y, num_draft + 1)
                 mx.eval(tokens, draft_tokens)
