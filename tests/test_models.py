@@ -2118,6 +2118,39 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_mamba_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import mamba
+
+        # The shorter prompt in a padded batch must match the prompt run alone.
+        mx.random.seed(0)
+        args = mamba.ModelArgs(
+            model_type="mamba",
+            vocab_size=100,
+            use_bias=False,
+            use_conv_bias=True,
+            conv_kernel=4,
+            hidden_size=64,
+            num_hidden_layers=2,
+            state_size=16,
+            intermediate_size=128,
+            time_step_rank=4,
+        )
+        model = mamba.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-4)
+
     def test_falcon_mamba_bcdt_normalization(self):
         from mlx_lm.models import mamba
 

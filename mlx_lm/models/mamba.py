@@ -117,7 +117,7 @@ class MambaBlock(nn.Module):
         y = y + D * x
         return y, new_state
 
-    def _process_sequence(self, x, conv_cache, state_cache):
+    def _process_sequence(self, x, conv_cache, state_cache, lengths=None):
         B, T, D = x.shape
         xz = self.in_proj(x)
         x, z = xz.split(indices_or_sections=2, axis=-1)
@@ -127,13 +127,25 @@ class MambaBlock(nn.Module):
         else:
             x_full = mx.pad(x, [(0, 0), (K - 1, 0), (0, 0)])
         conv_out = self.conv1d(x_full)
-        new_conv_cache = x_full[:, -(K - 1) :, :]
+        if lengths is not None:
+            # Right-padded batch: keep the inputs that end each sequence.
+            ends = mx.clip(lengths, 0, T)
+            positions = (ends[:, None] + mx.arange(K - 1))[..., None]
+            new_conv_cache = mx.take_along_axis(x_full, positions, axis=1)
+        else:
+            new_conv_cache = x_full[:, -(K - 1) :, :]
         x = nn.silu(conv_out)
         A = -mx.exp(self.A_log)
         current_state = state_cache
         y = []
         for t in range(T):
-            y_t, current_state = self.ssm_step(x[:, t], A, current_state)
+            y_t, next_state = self.ssm_step(x[:, t], A, current_state)
+            if lengths is not None and current_state is not None:
+                # Padding must not advance the state of a finished sequence.
+                next_state = mx.where(
+                    (t < lengths)[:, None, None], next_state, current_state
+                )
+            current_state = next_state
             y.append(y_t)
         y = mx.stack(y, axis=1)
         z = self.out_proj(swiglu(z, y))
@@ -145,13 +157,15 @@ class MambaBlock(nn.Module):
         else:
             conv_cache, state_cache = cache[0], cache[1]
 
+        lengths = cache.lengths if isinstance(cache, ArraysCache) else None
         output, (new_conv_cache, new_state_cache) = self._process_sequence(
-            x, conv_cache, state_cache
+            x, conv_cache, state_cache, lengths
         )
 
         if isinstance(cache, ArraysCache):
             cache[0] = new_conv_cache
             cache[1] = new_state_cache
+            cache.advance(x.shape[1])
 
         return output
 
