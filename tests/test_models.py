@@ -3658,6 +3658,49 @@ class TestModels(unittest.TestCase):
         err = mx.abs(got[uids[1]] - alone).max().item()
         self.assertLess(err, 1e-5)
 
+    def test_jamba_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import jamba
+
+        # The shorter prompt in a padded batch must match the prompt run alone.
+        mx.random.seed(0)
+        args = jamba.ModelArgs.from_dict(
+            {
+                "model_type": "jamba",
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "attn_layer_offset": 1,
+                "attn_layer_period": 2,
+                "expert_layer_offset": 1,
+                "expert_layer_period": 2,
+                "mamba_d_conv": 4,
+                "mamba_d_state": 16,
+                "mamba_expand": 2,
+                "num_experts": 2,
+                "num_experts_per_tok": 2,
+                "rms_norm_eps": 1e-5,
+                "max_position_embeddings": 512,
+                "vocab_size": 100,
+            }
+        )
+        model = jamba.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-4)
+
     def test_laguna_sanitize(self):
         from mlx_lm.models import laguna
 

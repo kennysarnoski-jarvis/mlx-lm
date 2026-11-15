@@ -170,7 +170,7 @@ class JambaMambaMixer(nn.Module):
         self.b_layernorm = nn.RMSNorm(self.ssm_state_size, eps=args.rms_norm_eps)
         self.c_layernorm = nn.RMSNorm(self.ssm_state_size, eps=args.rms_norm_eps)
 
-    def ssm_step(self, x, A, state=None):
+    def ssm_step(self, x, A, state=None, lengths=None):
         T = x.shape[1]
         D = self.D
         deltaBC = self.x_proj(x)
@@ -188,12 +188,17 @@ class JambaMambaMixer(nn.Module):
         for t in range(T):
             if state is not None:
                 new_state[:, t] = fma(state, dtA[:, t], new_state[:, t])
+                if lengths is not None:
+                    # Padding must not advance the state of a finished sequence.
+                    new_state[:, t] = mx.where(
+                        (t < lengths)[:, None, None], new_state[:, t], state
+                    )
             state = new_state[:, t]
         y = (new_state @ mx.expand_dims(C, -1)).squeeze(-1)
         y = y + D * x
         return y, new_state[:, -1]
 
-    def _process_sequence(self, x, conv_state, ssm_state):
+    def _process_sequence(self, x, conv_state, ssm_state, lengths=None):
         xz = self.in_proj(x)
         x, z = xz.split(indices_or_sections=2, axis=-1)
         K = self.conv_kernel_size
@@ -202,10 +207,16 @@ class JambaMambaMixer(nn.Module):
         else:
             x_full = mx.pad(x, [(0, 0), (K - 1, 0), (0, 0)])
         conv_out = self.conv1d(x_full)
-        conv_state = x_full[:, -(K - 1) :, :]
+        if lengths is not None:
+            # Right-padded batch: keep the inputs that end each sequence.
+            ends = mx.clip(lengths, 0, x.shape[1])
+            positions = (ends[:, None] + mx.arange(K - 1))[..., None]
+            conv_state = mx.take_along_axis(x_full, positions, axis=1)
+        else:
+            conv_state = x_full[:, -(K - 1) :, :]
         x = nn.silu(conv_out)
         A = -mx.exp(self.A_log)
-        y, ssm_state = self.ssm_step(x, A, ssm_state)
+        y, ssm_state = self.ssm_step(x, A, ssm_state, lengths)
         z = self.out_proj(swiglu(z, y))
         return z, (conv_state, ssm_state)
 
@@ -215,13 +226,15 @@ class JambaMambaMixer(nn.Module):
         else:
             conv_state, ssm_state = cache[0], cache[1]
 
+        lengths = cache.lengths if cache is not None else None
         output, (conv_state, ssm_state) = self._process_sequence(
-            x, conv_state, ssm_state
+            x, conv_state, ssm_state, lengths
         )
 
         if cache is not None:
             cache[0] = conv_state
             cache[1] = ssm_state
+            cache.advance(x.shape[1])
 
         return output
 
