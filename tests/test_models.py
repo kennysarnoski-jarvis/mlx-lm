@@ -3117,6 +3117,50 @@ class TestModels(unittest.TestCase):
             nemotron_h.ModelArgs.from_dict(unknown)
         self.assertIn("sliding_attention", str(raised.exception))
 
+    def test_nemotron_h_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import nemotron_h
+
+        # The SSM update must use cache.lengths, as in #1908.
+        mx.random.seed(0)
+        args = nemotron_h.ModelArgs.from_dict(
+            {
+                "model_type": "nemotron_h",
+                "vocab_size": 100,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "max_position_embeddings": 512,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "attention_bias": False,
+                "mamba_num_heads": 4,
+                "mamba_head_dim": 32,
+                "mamba_proj_bias": False,
+                "ssm_state_size": 32,
+                "conv_kernel": 4,
+                "n_groups": 1,
+                "mlp_bias": False,
+                "layer_norm_epsilon": 1e-5,
+                "use_bias": False,
+                "use_conv_bias": True,
+                "hybrid_override_pattern": ["M", "*"],
+            }
+        )
+        model = nemotron_h.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-5)
+
     def test_phi3small(self):
         from mlx_lm.models import phi3small
 
