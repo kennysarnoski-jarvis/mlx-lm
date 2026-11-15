@@ -17,7 +17,7 @@ from mlx_lm.generate import (
     speculative_generate_step,
     stream_generate,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
+from mlx_lm.models.cache import KVCache, RotatingKVCache, make_prompt_cache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.utils import load
 
@@ -163,6 +163,39 @@ class TestGenerate(unittest.TestCase):
                     prompt, model, draft, num_draft_tokens=num_draft_tokens, **kwargs
                 )
                 self.assertEqual([t for t, _, _ in gen], expected)
+
+    def test_speculative_prompt_cache_holds_generated_tokens(self):
+        model = self.model
+
+        # Always proposes token 0, so the target rejects the drafts.
+        class RejectedDraft:
+            layers = model.layers
+
+            def __call__(self, inputs, cache=None):
+                return model(inputs, cache=cache).at[..., 0].add(1e4)
+
+        prompt = mx.array(self.tokenizer.encode("Write a story about Einstein"))
+        expected = make_prompt_cache(model)
+        for _ in generate_step(prompt, model, max_tokens=8, prompt_cache=expected):
+            pass
+        size = expected[0].offset
+
+        # With the model as its own draft, 8 tokens end on a draft token for
+        # 2 draft tokens and on a target token for 3.
+        for draft in [model, RejectedDraft()]:
+            for num_draft_tokens in [2, 3]:
+                cache = make_prompt_cache(model) + make_prompt_cache(model)
+                gen = speculative_generate_step(
+                    prompt,
+                    model,
+                    draft,
+                    num_draft_tokens=num_draft_tokens,
+                    max_tokens=8,
+                    prompt_cache=cache,
+                )
+                for _ in gen:
+                    pass
+                self.assertEqual([c.offset for c in cache], [size] * len(cache))
 
     def test_stream_generate_input_embeddings(self):
         sampler = make_sampler(temp=0.0)  # determinate sampler
