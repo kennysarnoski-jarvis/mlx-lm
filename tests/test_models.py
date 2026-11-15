@@ -3321,6 +3321,48 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_olmo_hybrid_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import olmo_hybrid
+
+        # The shorter prompt in a padded batch must match the prompt run alone.
+        mx.random.seed(0)
+        args = olmo_hybrid.ModelArgs(
+            model_type="olmo_hybrid",
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            rms_norm_eps=1e-4,
+            vocab_size=100,
+            max_position_embeddings=128,
+            linear_num_key_heads=1,
+            linear_num_value_heads=2,
+            linear_key_head_dim=32,
+            linear_value_head_dim=32,
+            linear_conv_kernel_dim=3,
+            linear_allow_neg_eigval=False,
+            tie_word_embeddings=False,
+            attention_bias=False,
+            rope_theta=1000,
+            layer_types=["linear_attention", "full_attention"],
+        )
+        model = olmo_hybrid.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-4)
+
     def test_exaone(self):
         from mlx_lm.models import exaone
 

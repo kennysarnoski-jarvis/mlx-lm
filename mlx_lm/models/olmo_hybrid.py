@@ -125,9 +125,13 @@ class GatedDeltaNet(nn.Module):
         conv_state: Optional[mx.array],
         cache_slot: Optional[Any],
         slot_idx: int,
+        mask: Optional[mx.array] = None,
     ) -> mx.array:
         B, S, D = x.shape
         n_keep = self.conv_kernel_size - 1
+
+        if mask is not None:
+            x = mx.where(mask[..., None], x, 0)
 
         if conv_state is not None:
             padded = mx.concatenate([conv_state, x], axis=1)
@@ -137,7 +141,12 @@ class GatedDeltaNet(nn.Module):
             )
 
         if cache_slot is not None:
-            cache_slot[slot_idx] = mx.contiguous(padded[:, -n_keep:, :])
+            if cache_slot.lengths is not None:
+                ends = mx.clip(cache_slot.lengths, 0, S)
+                positions = (ends[:, None] + mx.arange(n_keep))[..., None]
+                cache_slot[slot_idx] = mx.take_along_axis(padded, positions, axis=1)
+            else:
+                cache_slot[slot_idx] = mx.contiguous(padded[:, -n_keep:, :])
 
         return nn.silu(conv(padded))
 
@@ -157,9 +166,9 @@ class GatedDeltaNet(nn.Module):
         conv_k_state = cache[1] if cache is not None else None
         conv_v_state = cache[2] if cache is not None else None
 
-        q = self._apply_conv1d(q, self.q_conv1d, conv_q_state, cache, 0)
-        k = self._apply_conv1d(k, self.k_conv1d, conv_k_state, cache, 1)
-        v = self._apply_conv1d(v, self.v_conv1d, conv_v_state, cache, 2)
+        q = self._apply_conv1d(q, self.q_conv1d, conv_q_state, cache, 0, mask)
+        k = self._apply_conv1d(k, self.k_conv1d, conv_k_state, cache, 1, mask)
+        v = self._apply_conv1d(v, self.v_conv1d, conv_v_state, cache, 2, mask)
 
         q = q.reshape(B, S, self.num_k_heads, self.head_k_dim)
         k = k.reshape(B, S, self.num_k_heads, self.head_k_dim)
