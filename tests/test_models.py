@@ -3287,6 +3287,49 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_bailing_moe_linear_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import bailing_moe_linear
+
+        # The shorter prompt in a padded batch must match the prompt run alone.
+        mx.random.seed(0)
+        args = bailing_moe_linear.ModelArgs.from_dict(
+            {
+                "model_type": "bailing_moe_linear",
+                "hidden_size": 64,
+                "num_hidden_layers": 4,
+                "intermediate_size": 128,
+                "moe_intermediate_size": 64,
+                "num_experts_per_tok": 2,
+                "num_experts": 4,
+                "norm_topk_prob": True,
+                "num_shared_experts": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 100,
+                "rope_theta": 1000,
+                "first_k_dense_replace": 0,
+                "layer_group_size": 2,
+                "group_norm_size": 1,
+                "max_position_embeddings": 512,
+            }
+        )
+        model = bailing_moe_linear.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-4)
+
     def test_olmo_hybrid(self):
         from mlx_lm.models import olmo_hybrid
 

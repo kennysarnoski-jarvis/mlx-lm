@@ -67,6 +67,7 @@ def recurrent_gla(
     g: mx.array,
     scale: float,
     h: Optional[mx.array] = None,
+    lengths: Optional[mx.array] = None,
 ) -> mx.array:
     """
     Recurrence per (b, h):
@@ -86,7 +87,11 @@ def recurrent_gla(
         v_t = v[:, :, t : t + 1]
         h_up = k_t.transpose(0, 1, 3, 2) @ v_t
         if h is not None:
-            h = h * exp_g + h_up
+            h_next = h * exp_g + h_up
+            if lengths is not None:
+                # Padding must not advance the state of a finished sequence.
+                h_next = mx.where((t < lengths)[:, None, None, None], h_next, h)
+            h = h_next
         else:
             h = h_up
         o_t = q_t @ h
@@ -308,6 +313,7 @@ class LinearAttention(nn.Module):
         queries = self.rope(queries, offset=offset)
         keys = self.rope(keys, offset=offset)
 
+        lengths = cache.lengths if cache is not None else None
         if cache is None:
             cache = [None]
         output, cache[0] = recurrent_gla(
@@ -317,7 +323,10 @@ class LinearAttention(nn.Module):
             g=self._slope,
             scale=self.scale,
             h=cache[0],
+            lengths=lengths,
         )
+        if isinstance(cache, ArraysCache):
+            cache.advance(L)
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         output = self.g_norm(output) * mx.sigmoid(self.g_proj(x))
         return self.dense(output)
