@@ -3142,6 +3142,56 @@ class TestModels(unittest.TestCase):
         dummy = out[..., model._dummy_tokenizer_ids]
         self.assertTrue(mx.all(dummy == -float("inf")).item())
 
+    def test_longcat_flash_ngram_padded_batch(self):
+        from mlx_lm.generate import BatchGenerator, generate_step
+        from mlx_lm.models import longcat_flash_ngram
+
+        # The shorter prompt in a padded batch must match the prompt run alone.
+        mx.random.seed(0)
+        args = longcat_flash_ngram.ModelArgs.from_dict(
+            {
+                "model_type": "longcat_flash_ngram",
+                "attention_method": "MLA",
+                "zero_expert_type": "identity",
+                "hidden_size": 64,
+                "ffn_hidden_size": 64,
+                "moe_topk": 2,
+                "expert_ffn_hidden_size": 64,
+                "n_routed_experts": 2,
+                "zero_expert_num": 2,
+                "num_layers": 2,
+                "num_hidden_layers": 2,
+                "vocab_size": 100,
+                "max_position_embeddings": 512,
+                "num_attention_heads": 4,
+                "kv_lora_rank": 16,
+                "q_lora_rank": 16,
+                "qk_rope_head_dim": 8,
+                "qk_nope_head_dim": 8,
+                "v_head_dim": 8,
+                "routed_scaling_factor": 1.0,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 1000,
+                "mla_scale_q_lora": True,
+                "mla_scale_kv_lora": True,
+                "attention_bias": False,
+            }
+        )
+        model = longcat_flash_ngram.Model(args)
+
+        _, alone = next(generate_step(mx.array([7, 8, 9]), model, max_tokens=1))
+
+        gen = BatchGenerator(model, max_tokens=1)
+        uids = gen.insert([list(range(1, 13)), [7, 8, 9]])
+        got = {}
+        while len(got) < 2:
+            for r in gen.next_generated():
+                got[r.uid] = r.logprobs
+        gen.close()
+
+        err = mx.abs(got[uids[1]] - alone).max().item()
+        self.assertLess(err, 1e-4)
+
     def test_phimoe(self):
         from mlx_lm.models import phimoe
 

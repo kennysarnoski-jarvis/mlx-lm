@@ -112,12 +112,24 @@ class NgramEmbedding(nn.Module):
 
         input_ids = input_ids.astype(mx.int64)
         if cache is not None:
+            # The cached context always holds n - 1 tokens, zero filled on the
+            # left, which is what _shift_right uses for missing context.
+            keep = self.n - 1
             context = cache[0]
             if context is None:
-                context = input_ids
-            else:
-                context = mx.concatenate([context, input_ids], axis=-1)
-            cache[0] = context[..., max(0, context.shape[-1] - self.n + 1) :]
+                context = mx.zeros((input_ids.shape[0], keep), dtype=mx.int64)
+            elif context.shape[-1] < keep:
+                context = mx.pad(context, [(0, 0), (keep - context.shape[-1], 0)])
+            context = mx.concatenate([context, input_ids], axis=-1)
+            if keep > 0:
+                if cache.lengths is not None:
+                    # Right-padded batch: keep the tokens that end each sequence.
+                    ends = mx.clip(cache.lengths, 0, seq_len)
+                    positions = ends[:, None] + mx.arange(keep)
+                    cache[0] = mx.take_along_axis(context, positions, axis=1)
+                else:
+                    cache[0] = context[..., -keep:]
+            cache.advance(seq_len)
         else:
             context = input_ids
 
